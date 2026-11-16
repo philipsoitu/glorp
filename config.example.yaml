@@ -1,0 +1,27 @@
+# Model IDs are illustrative: replace them with IDs actually served upstream.
+provider_list:
+  - name: custom_provider_name
+    base_url: https://ai.soitu.ca/v1
+    protocol: openai-completions
+    api_key: "${CUSTOM_PROVIDER_API_KEY}"
+    models:
+      - id: gpt-6-luna
+        name: GPT 6 Luna
+      - id: gpt-6.1-sol
+        name: GPT 6.1 Sol
+
+  - name: local_ollama
+    base_url: localhost:11434/v1
+    protocol: openai-completions
+    api_key: local-unused
+    models:
+      - id: qwen3.8-27b
+        name: Qwen 3.8 27B
+
+# To use /v1/responses, add a provider with protocol: openai-responses and
+# unique model IDs. Protocols are never translated.
+server:
+  host: 127.0.0.1
+  port: 8000
+  database: ./data/glorp.sqlite3
+  # api_key_env: GLORP_API_KEY
