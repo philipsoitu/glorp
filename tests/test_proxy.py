@@ -17,24 +17,24 @@ async def test_routes_headers_models_and_health(harness):
         assert (await client.get("/health")).json() == {"status": "ok"}
         models = (await client.get("/v1/models")).json()["data"]
         assert [(m["id"], m["name"], m["owned_by"]) for m in models] == [
-            ("chat-id", "Chat Name", "remote"),
-            ("local-id", "Local Name", "local"),
-            ("responses-id", "Responses Name", "responses"),
+            ("remote/chat-id", "Chat Name", "remote"),
+            ("local/local-id", "Local Name", "local"),
+            ("responses/responses-id", "Responses Name", "responses"),
         ]
         for body, endpoint in [
             ({"model": "Chat Name"}, "chat/completions"),
-            ({"model": "responses-id", "input": "hello"}, "chat/completions"),
-            ({"model": "chat-id", "input": "hello"}, "responses"),
-            ({"model": "chat-id", "messages": [], "stream": 1}, "chat/completions"),
+            ({"model": "responses/responses-id", "input": "hello"}, "chat/completions"),
+            ({"model": "remote/chat-id", "input": "hello"}, "responses"),
+            ({"model": "remote/chat-id", "messages": [], "stream": 1}, "chat/completions"),
         ]:
             response = await client.post("/v1/" + endpoint, json=body)
             assert response.status_code == 400 and "error" in response.json()
-        for content in ("[", "[]", '{"model":"chat-id","stream":NaN}'):
+        for content in ("[", "[]", '{"model":"remote/chat-id","stream":NaN}'):
             assert (await client.post("/v1/chat/completions", content=content)).status_code == 400
         assert not harness.calls
         response = await client.post(
             "/v1/chat/completions",
-            json={"model": "local-id", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "local/local-id", "messages": [{"role": "user", "content": "hi"}]},
             headers={
                 "Authorization": "Bearer INBOUND_SECRET",
                 "Cookie": "secret-cookie",
@@ -51,6 +51,7 @@ async def test_routes_headers_models_and_health(harness):
         assert not any(h in call.headers for h in ("cookie", "x-arbitrary", "x-glorp-session-id", "x-glorp-run-id"))
         row = (await harness.app.state.store.rows())[0]
         assert row["session_id"] == "session" and row["model"] == "local-id"
+        assert row["turns"][-1]["proxy_model"] == "local/local-id"
         assert row["turns"][-1]["upstream_request_id"] == "upstream-request"
         assert row["turns"][-1]["returned_model"] == CHAT["model"]
         assert "SECRET" not in json.dumps(row)
@@ -58,7 +59,7 @@ async def test_routes_headers_models_and_health(harness):
 
 async def test_agent_fields_and_unknown_fields_are_not_dropped(harness):
     body = {
-        "model": "chat-id",
+        "model": "remote/chat-id",
         "messages": [
             {"role": "system", "content": "system"},
             {"role": "developer", "content": "developer"},
@@ -88,7 +89,7 @@ async def test_agent_fields_and_unknown_fields_are_not_dropped(harness):
     async with harness.client() as client:
         response = await client.post("/v1/chat/completions", json=body)
         assert response.json() == CHAT
-        assert harness.body() == body
+        assert harness.body() == dict(body, model="chat-id")
         assert "x-do-not-forward" not in harness.calls[0].headers
         row = (await harness.app.state.store.rows())[0]
         assert row["context"] == body["messages"] + [CHAT["choices"][0]["message"]]
@@ -98,7 +99,7 @@ async def test_agent_fields_and_unknown_fields_are_not_dropped(harness):
 
 async def test_responses_passthrough_and_previous_reference(harness):
     body = {
-        "model": "responses-id",
+        "model": "responses/responses-id",
         "input": "hello",
         "instructions": "do things",
         "reasoning": {"effort": "high"},
@@ -109,13 +110,13 @@ async def test_responses_passthrough_and_previous_reference(harness):
     async with harness.client() as client:
         response = await client.post("/v1/responses", json=body)
         assert response.json() == RESPONSE
-        assert harness.body() == body
+        assert harness.body() == dict(body, model="responses-id")
         row = (await harness.app.state.store.rows())[0]
         assert row["context"] == [{"role": "user", "content": "hello"}] + RESPONSE["output"]
         result = await client.post(
             "/v1/responses",
             json={
-                "model": "responses-id",
+                "model": "responses/responses-id",
                 "previous_response_id": "resp-one",
                 "instructions": "do things",
                 "input": [{"type": "function_call_output", "call_id": "call-1", "output": "result"}],
@@ -132,16 +133,16 @@ async def test_responses_passthrough_and_previous_reference(harness):
 async def test_two_turns_model_switch_and_unknown_conversation(harness):
     async with harness.client() as client:
         initial = [{"role": "user", "content": "hello"}]
-        first = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": initial})
+        first = await client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": initial})
         history = initial + [CHAT["choices"][0]["message"], {"role": "user", "content": "next"}]
-        second = await client.post("/v1/chat/completions", json={"model": "local-id", "messages": history})
+        second = await client.post("/v1/chat/completions", json={"model": "local/local-id", "messages": history})
         assert first.headers["x-glorp-conversation-id"] == second.headers["x-glorp-conversation-id"]
         row = (await harness.app.state.store.rows())[0]
         assert len(row["context"]) == 4 and [t["model"] for t in row["turns"]] == ["chat-id", "local-id"]
         before = len(harness.calls)
         invalid = await client.post(
             "/v1/chat/completions",
-            json={"model": "chat-id", "messages": initial},
+            json={"model": "remote/chat-id", "messages": initial},
             headers={"X-Glorp-Conversation-Id": "unknown"},
         )
         assert invalid.status_code == 400 and len(harness.calls) == before
@@ -169,7 +170,7 @@ async def test_upstream_status_no_retries_and_safe_errors(tmp_path, status, capl
         assert (await client.get("/health", headers={"Authorization": "Bearer wrong"})).status_code == 401
         response = await client.post(
             "/v1/chat/completions",
-            json={"model": "chat-id", "messages": []},
+            json={"model": "remote/chat-id", "messages": []},
             headers={"Authorization": "Bearer INBOUND_SECRET"},
         )
         assert response.status_code == status and len(harness.calls) == 1
@@ -185,7 +186,7 @@ async def test_transport_errors_no_retries(tmp_path, exception, status):
 
     harness = Harness(config_for(tmp_path), handler)
     async with harness.client() as client:
-        response = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": []})
+        response = await client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": []})
         assert response.status_code == status and len(harness.calls) == 1
         assert "SECRET" not in response.text + json.dumps(await harness.app.state.store.rows())
 
@@ -198,11 +199,11 @@ async def test_database_failures(harness, monkeypatch, caplog):
         store = harness.app.state.store
         original = store.reserve
         monkeypatch.setattr(store, "reserve", fail)
-        response = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": []})
+        response = await client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": []})
         assert response.status_code == 503 and not harness.calls
         monkeypatch.setattr(store, "reserve", original)
         monkeypatch.setattr(store, "finalize", fail)
-        response = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": []})
+        response = await client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": []})
         assert response.status_code == 503 and len(harness.calls) == 1
         assert "persistence failed" in caplog.text
 
@@ -225,9 +226,11 @@ async def test_official_client_public_surface(harness):
             max_retries=0,
             http_client=httpx2.AsyncClient(transport=httpx2.ASGITransport(app=harness.app)),
         ) as client:
-            chat = await client.chat.completions.create(model="chat-id", messages=[{"role": "user", "content": "hi"}])
+            chat = await client.chat.completions.create(
+                model="remote/chat-id", messages=[{"role": "user", "content": "hi"}]
+            )
             assert chat.choices[0].message.content == "hi"
-            response = await client.responses.create(model="responses-id", input="hello")
+            response = await client.responses.create(model="responses/responses-id", input="hello")
             assert response.output[0].type == "reasoning"
 
 
@@ -253,7 +256,7 @@ async def test_multiple_choices_and_concurrent_calls(tmp_path):
         async def send():
             return await client.post(
                 "/v1/chat/completions",
-                json={"model": "chat-id", "messages": [{"role": "user", "content": "hi"}], "n": 2},
+                json={"model": "remote/chat-id", "messages": [{"role": "user", "content": "hi"}], "n": 2},
             )
 
         tasks = [asyncio.create_task(send()), asyncio.create_task(send())]
@@ -279,6 +282,6 @@ async def test_environment_credentials_not_saved(tmp_path, monkeypatch):
 
     harness = Harness(config, handler)
     async with harness.client() as client:
-        response = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": []})
+        response = await client.post("/v1/chat/completions", json={"model": "p/chat-id", "messages": []})
         assert response.status_code == 400
         assert "ENV_SECRET" not in response.text + json.dumps(await harness.app.state.store.rows())

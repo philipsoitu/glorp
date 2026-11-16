@@ -127,7 +127,7 @@ async def test_responses_failure_redacts_errors_and_preserves_status(tmp_path, s
     harness = Harness(config_for(tmp_path), handler)
     async with harness.client() as client:
         response = await client.post(
-            "/v1/responses", json={"model": "responses-id", "input": "hello", "stream": stream}
+            "/v1/responses", json={"model": "responses/responses-id", "input": "hello", "stream": stream}
         )
         row = (await harness.app.state.store.rows())[0]
         assert response.status_code == 200 and row["status"] == "failed"
@@ -143,7 +143,7 @@ async def test_non_json_error_retained_locally_not_returned(tmp_path):
 
     harness = Harness(config_for(tmp_path), handler)
     async with harness.client() as client:
-        result = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": []})
+        result = await client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": []})
         assert result.status_code == 500 and "private debug details" not in result.text
         error = (await harness.app.state.store.rows())[0]["turns"][-1]["error"]
         assert error["upstream_body"] == "<html>[REDACTED] private debug details</html>"
@@ -152,11 +152,15 @@ async def test_non_json_error_retained_locally_not_returned(tmp_path):
 async def test_unknown_opposite_dialect_history_field_preserved_in_options(harness):
     async with harness.client() as client:
         for endpoint, body, unknown in [
-            ("chat/completions", {"model": "chat-id", "messages": [], "input": {"unknown": True}}, "input"),
-            ("responses", {"model": "responses-id", "input": "hello", "messages": {"unknown": True}}, "messages"),
+            ("chat/completions", {"model": "remote/chat-id", "messages": [], "input": {"unknown": True}}, "input"),
+            (
+                "responses",
+                {"model": "responses/responses-id", "input": "hello", "messages": {"unknown": True}},
+                "messages",
+            ),
         ]:
             result = await client.post("/v1/" + endpoint, json=body)
-            assert result.status_code == 200 and harness.body() == body
+            assert result.status_code == 200 and harness.body() == dict(body, model=body["model"].split("/", 1)[1])
             row = next(
                 r for r in await harness.app.state.store.rows() if r["id"] == result.headers["x-glorp-conversation-id"]
             )
@@ -166,7 +170,9 @@ async def test_unknown_opposite_dialect_history_field_preserved_in_options(harne
 async def test_empty_conversation_id_not_silently_ignored(harness):
     async with harness.client() as client:
         result = await client.post(
-            "/v1/chat/completions", json={"model": "chat-id", "messages": []}, headers={"X-Glorp-Conversation-Id": ""}
+            "/v1/chat/completions",
+            json={"model": "remote/chat-id", "messages": []},
+            headers={"X-Glorp-Conversation-Id": ""},
         )
         assert result.status_code == 400 and not harness.calls
 
@@ -223,7 +229,9 @@ async def test_streaming_tools_and_refusal_equal_nonstream(tmp_path):
     upstream = UpstreamStream(chunks + [wire("[DONE]")])
     harness = streaming_harness(tmp_path, upstream)
     async with harness.client() as client:
-        result = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": [], "stream": True})
+        result = await client.post(
+            "/v1/chat/completions", json={"model": "remote/chat-id", "messages": [], "stream": True}
+        )
         assert "[DONE]" in result.text
         assert (await harness.app.state.store.rows())[0]["context"] == [message]
 
@@ -233,7 +241,7 @@ async def test_official_client_actual_tcp_stream(tmp_path):
     harness = streaming_harness(tmp_path, upstream)
     async with live_server(harness.app) as base:
         async with AsyncOpenAI(base_url=base + "/v1", api_key="unused", max_retries=0) as client:
-            stream = await client.chat.completions.create(model="chat-id", messages=[], stream=True)
+            stream = await client.chat.completions.create(model="remote/chat-id", messages=[], stream=True)
             text = ""
             async for chunk in stream:
                 if chunk.choices:
@@ -256,7 +264,7 @@ async def test_disconnect_while_waiting_for_headers(tmp_path):
     async with live_server(harness.app) as base:
         async with httpx.AsyncClient(base_url=base, timeout=None) as client:
             call = asyncio.create_task(
-                client.post("/v1/chat/completions", json={"model": "chat-id", "messages": [], "stream": True})
+                client.post("/v1/chat/completions", json={"model": "remote/chat-id", "messages": [], "stream": True})
             )
             await asyncio.wait_for(entered.wait(), 2)
             call.cancel()
@@ -271,12 +279,12 @@ async def test_disconnect_while_waiting_for_headers(tmp_path):
 async def test_chat_unknown_state_fields_do_not_reconstruct_responses_history(harness):
     async with harness.client() as client:
         first = await client.post(
-            "/v1/chat/completions", json={"model": "chat-id", "messages": [{"role": "user", "content": "one"}]}
+            "/v1/chat/completions", json={"model": "remote/chat-id", "messages": [{"role": "user", "content": "one"}]}
         )
         result = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "chat-id",
+                "model": "remote/chat-id",
                 "messages": [{"role": "user", "content": "two"}],
                 "previous_response_id": "chat-one",
                 "conversation": "vendor-field",
@@ -295,7 +303,9 @@ async def test_responses_failed_terminal_empty_output_keeps_observed_partial(tmp
     upstream = UpstreamStream(events[:-1] + [wire({"type": "response.failed", "response": failure}, "response.failed")])
     harness = streaming_harness(tmp_path, upstream)
     async with harness.client() as client:
-        result = await client.post("/v1/responses", json={"model": "responses-id", "input": "hello", "stream": True})
+        result = await client.post(
+            "/v1/responses", json={"model": "responses/responses-id", "input": "hello", "stream": True}
+        )
         assert "event: response.failed" in result.text
         row = (await harness.app.state.store.rows())[0]
         assert row["status"] == "failed" and row["turns"][-1]["partial_output"]
@@ -311,7 +321,9 @@ async def test_responses_write_failure_does_not_emit_success_terminal(tmp_path, 
             raise sqlite3.OperationalError("disk full")
 
         monkeypatch.setattr(harness.app.state.store, "finalize", fail)
-        result = await client.post("/v1/responses", json={"model": "responses-id", "input": "hello", "stream": True})
+        result = await client.post(
+            "/v1/responses", json={"model": "responses/responses-id", "input": "hello", "stream": True}
+        )
         assert "response.output_text.delta" in result.text and "event: error" in result.text
         assert "event: response.completed" not in result.text
         assert upstream.closed.is_set()
@@ -333,7 +345,7 @@ async def test_shutdown_closes_stalled_stream_and_saves_partial(tmp_path):
     async with httpx.AsyncClient(timeout=3) as client:
         async with live_server(harness.app) as base:
             context = client.stream(
-                "POST", base + "/v1/chat/completions", json={"model": "chat-id", "messages": [], "stream": True}
+                "POST", base + "/v1/chat/completions", json={"model": "remote/chat-id", "messages": [], "stream": True}
             )
             response = await context.__aenter__()
             lines = response.aiter_lines()

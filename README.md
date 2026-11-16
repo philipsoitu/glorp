@@ -1,8 +1,8 @@
 # Glorp
 
-A small personal OpenAI-compatible proxy that routes exact model IDs and records
-whole conversation branches in local SQLite. Python **3.14+**, `uv`, one worker.
-No model aliases, protocol translation, retries, inference hosting, or training pipeline.
+A small personal OpenAI-compatible proxy that routes **provider/model** IDs and
+records whole conversation branches in local SQLite. Python **3.14+**, `uv`, one worker.
+No arbitrary model aliases, protocol translation, retries, inference hosting, or training pipeline.
 
 ## Run
 
@@ -19,9 +19,19 @@ The default configuration path is `config.yaml`. The default address is
 file**, not your current directory. Schema creation and recovery happen before
 traffic is accepted. Configuration is fixed until restart.
 
-Each `provider_list` entry supplies a unique name, fixed base URL, protocol,
-API key, and models with unique `id` and display-only `name` fields. Model IDs
-must be unique **across all providers** and match upstream IDs exactly.
+Each `provider_list` entry supplies a unique name (without `/`), fixed base URL,
+protocol, API key, and models with `id` and display-only `name` fields. YAML model
+IDs must match upstream IDs exactly and be unique **within that provider**;
+different providers can expose the same upstream ID.
+
+Use **`<provider name>/<model id>`** in requests to Glorp. For example, provider
+`custom_provider` with YAML model `id: gpt-6-luna` is requested as
+`custom_provider/gpt-6-luna`. Glorp sends only `gpt-6-luna` upstream. If the upstream
+ID itself contains slashes, keep them: `custom_provider/org/model` forwards
+`org/model`. Do not add the provider prefix to YAML model IDs.
+
+Bare IDs such as `gpt-6-luna` are rejected, even with only one provider. Upstream
+response model IDs (including versioned names) are returned unchanged.
 
 - `openai-completions`: only `POST /v1/chat/completions`.
 - `openai-responses`: only `POST /v1/responses`.
@@ -51,7 +61,7 @@ client = OpenAI(
     max_retries=0,  # Avoid harness-side retries too, if desired.
 )
 result = client.chat.completions.create(
-    model="gpt-6-luna",  # Replace with a configured upstream ID.
+    model="custom_provider/gpt-6-luna",  # Provider name + configured upstream ID.
     messages=[{"role": "user", "content": "Explain this repository."}],
     extra_headers={"X-Glorp-Session-Id": "example-session"},
 )
@@ -65,7 +75,7 @@ additional JSON fields pass through without dialect translation. The proxy never
 executes tools or fetches files/images. SDK objects are serialized without
 inventing absent optional fields or removing unknown response fields.
 
-`GET /v1/models` lists only configured IDs, provider ownership, and display names.
+`GET /v1/models` lists the provider-qualified IDs to use, provider ownership, and display names.
 `GET /health` checks the service and SQLite connection. Neither calls upstream.
 
 ### Conversation identity
@@ -93,7 +103,7 @@ To retrieve headers with the SDK, use its raw response interface:
 
 ```python
 raw = client.chat.completions.with_raw_response.create(
-    model="gpt-6-luna",
+    model="custom_provider/gpt-6-luna",
     messages=[{"role": "user", "content": "Hello"}],
     extra_headers={"X-Glorp-Session-Id": "another-chat"},
 )
@@ -149,11 +159,15 @@ log-reading API or automatic retention/deletion exists.
 ## Storage and failure semantics
 
 The only application table is `conversations`: one full native transcript and an
-ordered array of turn metadata per branch, with parent/fork boundaries, exact
-requested/returned model IDs, options, usage (null if absent), response/request
-IDs, status, timing, completeness, and revision. Each fork includes applicable
-ancestor metadata. Provenance is not invented for harness-supplied messages.
-No per-request history snapshots, raw-response archives, or stream-event rows.
+ordered array of turn metadata per branch, with parent/fork boundaries, model
+IDs, options, usage (null if absent), response/request IDs, status, timing,
+completeness, and revision. The row/turn `model` remains the exact upstream request
+ID; each new turn also records the namespaced `proxy_model` and exact
+`returned_model`. Request options retain the original proxy-facing `model`.
+Existing databases remain usable without migration; old turns are not rewritten.
+Each fork includes applicable ancestor metadata. Provenance is not invented for
+harness-supplied messages. No per-request history snapshots, raw-response archives,
+or stream-event rows.
 
 SQLite uses WAL, foreign keys, a busy timeout, and short serialized transactions.
 Input is reserved **before** an upstream attempt. Output is assembled in memory

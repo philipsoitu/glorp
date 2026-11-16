@@ -149,7 +149,7 @@ def create_app(config: Config, *, adapter_factory=create_adapter, store_factory=
         return {
             "object": "list",
             "data": [
-                {"id": m.id, "object": "model", "created": 0, "owned_by": p.name, "name": m.name}
+                {"id": f"{p.name}/{m.id}", "object": "model", "created": 0, "owned_by": p.name, "name": m.name}
                 for p in config.providers
                 for m in p.models
             ],
@@ -196,7 +196,13 @@ def create_app(config: Config, *, adapter_factory=create_adapter, store_factory=
         model = body.get("model")
         provider = config.routes.get(model) if isinstance(model, str) else None
         if not provider:
-            return JSONResponse(error_body("Unknown model ID", code="model_not_found"), status_code=400)
+            return JSONResponse(
+                error_body("Unknown model ID; use provider/model from /v1/models", code="model_not_found"),
+                status_code=400,
+            )
+        # Remove only the configured provider prefix. Upstream IDs can themselves
+        # contain slashes (for example, huggingface-org/model-name).
+        upstream_model = model.removeprefix(provider.name + "/")
         endpoint = request.url.path
         if endpoint != ENDPOINTS[provider.protocol]:
             return JSONResponse(error_body("Endpoint does not match the model's configured protocol"), status_code=400)
@@ -222,6 +228,7 @@ def create_app(config: Config, *, adapter_factory=create_adapter, store_factory=
         request_id = str(uuid4())
         headers = {"X-Glorp-Request-Id": request_id}
         outbound = deepcopy(body)
+        outbound["model"] = upstream_model
         additions = {}
         streaming = body.get("stream", False)
         if streaming and provider.protocol == "openai-completions":
@@ -239,7 +246,8 @@ def create_app(config: Config, *, adapter_factory=create_adapter, store_factory=
                 endpoint=endpoint,
                 protocol=provider.protocol,
                 provider=provider.name,
-                model=model,
+                model=upstream_model,
+                proxy_model=model,
                 options=options,
                 proxy_options=additions,
                 conversation_id=request.headers.get("x-glorp-conversation-id"),

@@ -1,6 +1,7 @@
 # Model IDs are illustrative: replace them with IDs actually served upstream.
+# Request these through Glorp as provider/model, e.g. custom_provider/gpt-6-luna.
 provider_list:
-  - name: custom_provider_name
+  - name: custom_provider
     base_url: https://ai.soitu.ca/v1
     protocol: openai-completions
     api_key: "${CUSTOM_PROVIDER_API_KEY}"
@@ -19,7 +20,8 @@ provider_list:
         name: Qwen 3.8 27B
 
 # To use /v1/responses, add a provider with protocol: openai-responses and
-# unique model IDs. Protocols are never translated.
+# a unique provider name. Model IDs need only be unique within each provider.
+# Protocols are never translated.
 server:
   host: 127.0.0.1
   port: 8000

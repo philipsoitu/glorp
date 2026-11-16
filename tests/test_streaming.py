@@ -123,7 +123,7 @@ async def test_stream_equivalent_to_nonstream(tmp_path, responses):
     upstream = UpstreamStream(response_events() if responses else chat_events())
     harness = streaming_harness(tmp_path, upstream)
     body = {
-        "model": "responses-id" if responses else "chat-id",
+        "model": "responses/responses-id" if responses else "remote/chat-id",
         "stream": True,
         **({"input": "hello"} if responses else {"messages": [{"role": "user", "content": "hello"}]}),
     }
@@ -143,6 +143,10 @@ async def test_stream_equivalent_to_nonstream(tmp_path, responses):
             comparison(m, row["protocol"]) for m in expected
         ]
         turn = row["turns"][-1]
+        assert harness.body()["model"] == ("responses-id" if responses else "chat-id")
+        assert turn["model"] == row["model"] == harness.body()["model"]
+        assert turn["proxy_model"] == body["model"]
+        assert turn["options"]["model"] == body["model"]
         assert turn["usage"] == (RESPONSE if responses else CHAT)["usage"]
         assert turn["upstream_request_id"] == "stream-request" and row["status"] == "completed"
         assert turn["proxy_options"] == ({} if responses else {"stream_options": {"include_usage": True}})
@@ -155,7 +159,12 @@ async def test_explicit_false_usage_and_missing_usage(tmp_path):
     async with harness.client() as client:
         result = await client.post(
             "/v1/chat/completions",
-            json={"model": "chat-id", "messages": [], "stream": True, "stream_options": {"include_usage": False}},
+            json={
+                "model": "remote/chat-id",
+                "messages": [],
+                "stream": True,
+                "stream_options": {"include_usage": False},
+            },
         )
         assert result.status_code == 200 and "[DONE]" in result.text
         assert harness.body()["stream_options"]["include_usage"] is False
@@ -184,7 +193,7 @@ async def test_incremental_and_success_waits_for_commit(tmp_path, responses, mon
                 "POST",
                 "/v1/responses" if responses else "/v1/chat/completions",
                 json={
-                    "model": "responses-id" if responses else "chat-id",
+                    "model": "responses/responses-id" if responses else "remote/chat-id",
                     "stream": True,
                     **({"input": "hello"} if responses else {"messages": [{"role": "user", "content": "hello"}]}),
                 },
@@ -229,7 +238,7 @@ async def test_real_downstream_disconnect_saves_partial_once(tmp_path, responses
                 "POST",
                 "/v1/responses" if responses else "/v1/chat/completions",
                 json={
-                    "model": "responses-id" if responses else "chat-id",
+                    "model": "responses/responses-id" if responses else "remote/chat-id",
                     "stream": True,
                     **({"input": "hello"} if responses else {"messages": [{"role": "user", "content": "hello"}]}),
                 },
@@ -261,7 +270,9 @@ async def test_midstream_failures_no_success_marker(tmp_path, failure, monkeypat
                 raise sqlite3.OperationalError("disk full")
 
             monkeypatch.setattr(harness.app.state.store, "finalize", fail)
-        response = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": [], "stream": True})
+        response = await client.post(
+            "/v1/chat/completions", json={"model": "remote/chat-id", "messages": [], "stream": True}
+        )
         assert response.status_code == 200
         assert "event: error" in response.text and "[DONE]" not in response.text
         assert upstream.closed.is_set() and "SECRET" not in response.text
@@ -279,7 +290,9 @@ async def test_responses_terminal_failure_http_200(tmp_path, status):
     upstream = UpstreamStream(response_events(status))
     harness = streaming_harness(tmp_path, upstream)
     async with harness.client() as client:
-        response = await client.post("/v1/responses", json={"model": "responses-id", "input": "hi", "stream": True})
+        response = await client.post(
+            "/v1/responses", json={"model": "responses/responses-id", "input": "hi", "stream": True}
+        )
         assert response.status_code == 200 and f"event: response.{status}" in response.text
         assert "event: response.completed" not in response.text and "[DONE]" not in response.text
         row = (await harness.app.state.store.rows())[0]
@@ -292,6 +305,8 @@ async def test_pre_stream_error_status(tmp_path):
 
     harness = Harness(config_for(tmp_path), handler)
     async with harness.client() as client:
-        result = await client.post("/v1/chat/completions", json={"model": "chat-id", "messages": [], "stream": True})
+        result = await client.post(
+            "/v1/chat/completions", json={"model": "remote/chat-id", "messages": [], "stream": True}
+        )
         assert result.status_code == 429 and result.headers["content-type"] == "application/json"
         assert result.headers["x-glorp-conversation-id"] and len(harness.calls) == 1

@@ -39,7 +39,7 @@ class Config:
 
     @property
     def routes(self) -> dict[str, Provider]:
-        return {m.id: p for p in self.providers for m in p.models}
+        return {f"{p.name}/{m.id}": p for p in self.providers for m in p.models}
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -118,10 +118,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     raw = mapping(raw, {"provider_list"}, {"server"}, "configuration")
     if not isinstance(raw["provider_list"], list) or not raw["provider_list"]:
         raise ConfigError("provider_list must be a nonempty list")
-    providers, names, ids = [], set(), set()
+    providers, names = [], set()
     for item in raw["provider_list"]:
         item = mapping(item, {"name", "base_url", "protocol", "api_key", "models"}, set(), "provider")
         name = text(item["name"], "provider name")
+        if "/" in name:
+            raise ConfigError("Provider names must not contain '/' (reserved for provider/model IDs)")
         if name in names:
             raise ConfigError("Duplicate provider name")
         names.add(name)
@@ -130,12 +132,12 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             raise ConfigError("Unsupported provider protocol")
         if not isinstance(item["models"], list) or not item["models"]:
             raise ConfigError("Provider models must be a nonempty list")
-        models = []
+        models, ids = [], set()
         for m in item["models"]:
             m = mapping(m, {"id", "name"}, set(), "model")
             mid = text(m["id"], "model id")
             if mid in ids:
-                raise ConfigError("Duplicate model ID")
+                raise ConfigError("Duplicate model ID within a provider")
             ids.add(mid)
             models.append(Model(mid, text(m["name"], "model name")))
         providers.append(
